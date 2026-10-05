@@ -1,0 +1,12 @@
+{
+  "name": "autonomy-hud",
+  "description": "A Claude Code mod that shows a live pane while the autonomy skill runs.",
+  "owner": { "name": "Rafael Aguilher da Costa" },
+  "plugins": [
+    {
+      "name": "autonomy-hud",
+      "source": "./",
+      "description": "While the autonomy skill is active, a right-hand pane shows the running step, the plan, decisions and a live timeline."
+    }
+  ]
+}

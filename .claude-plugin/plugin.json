@@ -1,0 +1,6 @@
+{
+  "name": "autonomy-hud",
+  "version": "0.1.0",
+  "description": "While the autonomy skill is active, a right-hand pane shows the running step, the plan, decisions and a live timeline.",
+  "types": "./types/index.d.ts"
+}
