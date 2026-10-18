@@ -28,6 +28,7 @@ const todos = atom({ plugin: 'autonomy-hud', key: 'todos' } as const, [])
 const decisions = atom({ plugin: 'autonomy-hud', key: 'decisions' } as const, [])
 const agents = atom({ plugin: 'autonomy-hud', key: 'agents' } as const, [])
 const clockNow = atom({ plugin: 'autonomy-hud', key: 'now' } as const, 0)
+const dismissed = atom({ plugin: 'autonomy-hud', key: 'dismissed' } as const, false)
 
 type Engine = EngineInterface
 type Input = Record<string, unknown>
@@ -75,6 +76,28 @@ const str = (input: Input, key: string) => {
 
 // ---------- describing a step ----------
 
+const LEADING_CD = /^\s*cd\s+(?:"[^"]*"|'[^']*'|\S+)\s*(?:&&|;)\s*/
+const ENV_PREFIX = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/
+const WRAPPERS = new Set(['sudo', 'env', 'time', 'nohup', 'exec', 'command'])
+
+export function stripPrelude(command: string): string {
+  let rest = command.trim()
+  for (let previous = ''; previous !== rest; ) {
+    previous = rest
+    rest = rest.replace(LEADING_CD, '').replace(ENV_PREFIX, '')
+  }
+  return rest
+}
+
+export function programOf(command: string): string {
+  const words = stripPrelude(command).split(/\s+/).filter(Boolean)
+  const word = words.find(one => !WRAPPERS.has(one)) ?? ''
+  return basename(word.replace(/^[({]+/, ''))
+}
+
+export const tidyPaths = (text: string) =>
+  text.replace(/\/(?:Users|home)\/[^/\s]+/g, '~')
+
 export function shortTool(tool: string): string {
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
   if (mcp) return `${mcp[1]?.replace(/^(claude_ai_|plugin_)/, '')}·${mcp[2]}`
@@ -85,19 +108,23 @@ export function describe(tool: string, input: Input): { label: string; detail: s
   switch (tool) {
     case 'Bash': {
       const command = str(input, 'command')
-      return { label: str(input, 'description') || firstLine(command), detail: firstLine(command) }
+      const program = programOf(command)
+      return {
+        label: str(input, 'description') || (program ? `Running ${program}` : 'Running a command'),
+        detail: tidyPaths(firstLine(stripPrelude(command))),
+      }
     }
     case 'Read':
-      return { label: `Reading ${basename(str(input, 'file_path'))}`, detail: str(input, 'file_path') }
+      return { label: `Reading ${basename(str(input, 'file_path'))}`, detail: tidyPaths(str(input, 'file_path')) }
     case 'Edit':
-      return { label: `Editing ${basename(str(input, 'file_path'))}`, detail: str(input, 'file_path') }
+      return { label: `Editing ${basename(str(input, 'file_path'))}`, detail: tidyPaths(str(input, 'file_path')) }
     case 'Write':
-      return { label: `Writing ${basename(str(input, 'file_path'))}`, detail: str(input, 'file_path') }
+      return { label: `Writing ${basename(str(input, 'file_path'))}`, detail: tidyPaths(str(input, 'file_path')) }
     case 'NotebookEdit':
-      return { label: `Editing ${basename(str(input, 'notebook_path'))}`, detail: str(input, 'notebook_path') }
+      return { label: `Editing ${basename(str(input, 'notebook_path'))}`, detail: tidyPaths(str(input, 'notebook_path')) }
     case 'Grep':
     case 'Glob':
-      return { label: `Searching ${str(input, 'pattern')}`, detail: str(input, 'path') }
+      return { label: `Searching ${str(input, 'pattern')}`, detail: tidyPaths(str(input, 'path')) }
     case 'Agent': {
       const type = str(input, 'subagent_type') || 'general-purpose'
       return { label: str(input, 'description') || 'Delegating', detail: `agent · ${type}` }
@@ -116,6 +143,10 @@ export function describe(tool: string, input: Input): { label: string; detail: s
       return { label: 'Loading tools', detail: str(input, 'query') }
     case 'Workflow':
       return { label: 'Running a workflow', detail: '' }
+    case 'SendMessage':
+      return { label: 'Messaging an agent', detail: str(input, 'summary') }
+    case 'ScheduleWakeup':
+      return { label: 'Scheduling a wake-up', detail: str(input, 'reason') }
     default:
       return { label: shortTool(tool), detail: '' }
   }
@@ -177,6 +208,8 @@ function startTicker($: Engine) {
 }
 
 async function showPane($: Engine, isAsked: boolean) {
+  if (isAsked) await update($, dismissed, () => false)
+  else if (await read($, dismissed)) return
   const opened = await $.ui.open({ id: PANE, title: TITLE })
   if (!opened.isPlaced && !isAsked) {
     $.ui.toast(`Autonomy HUD is ready: widen the terminal or run /${COMMAND}`)
@@ -194,6 +227,7 @@ async function activate($: Engine) {
       update($, decisions, () => []),
       update($, agents, () => []),
       update($, clockNow, () => now),
+      update($, dismissed, () => false),
     ])
   }
   isActive = true
@@ -202,15 +236,18 @@ async function activate($: Engine) {
   await refreshStatus($)
 }
 
+async function closePane($: Engine) {
+  if ((await $.ui.panes()).some(pane => pane.id === PANE)) await $.ui.close({ id: PANE })
+}
+
 async function deactivate($: Engine, why: string) {
-  if (!isActive) return
-  const [held, now] = await Promise.all([read($, session), $.clock.now()])
   isActive = false
   stopTick?.cancel()
   stopTick = undefined
-  await Promise.all([update($, session, () => null), update($, current, () => null), update($, agents, () => [])])
   $.ui.status(undefined)
-  await $.ui.close({ id: PANE })
+  await closePane($)
+  const [held, now] = await Promise.all([read($, session), $.clock.now()])
+  await Promise.all([update($, session, () => null), update($, current, () => null), update($, agents, () => [])])
   if (held !== null) {
     $.ui.toast(`Autonomy ${why} after ${formatElapsed(now - held.since)} · ${held.steps} steps · ${held.errors} errors`)
   }
@@ -251,7 +288,10 @@ export const register: Register = on => {
   on('command.run', { command: COMMAND }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'off') {
-      if (!isActive) return { text: 'Autonomy HUD is not tracking.' }
+      if ((await read($, session)) === null) {
+        await closePane($)
+        return { text: 'Autonomy HUD is not tracking.' }
+      }
       await deactivate($, 'tracking stopped')
       return { text: 'Autonomy HUD stopped tracking.' }
     }
@@ -272,6 +312,11 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     if (isActive && RELEASE.test(e.text)) await deactivate($, 'handed back')
+    return next(e)
+  })
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') await update($, dismissed, () => true)
     return next(e)
   })
 

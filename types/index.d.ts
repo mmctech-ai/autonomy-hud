@@ -41,6 +41,7 @@ declare module 'claude-code' {
       decisions: HudDecision[]
       agents: HudAgent[]
       now: number
+      dismissed: boolean
     }
   }
 }
